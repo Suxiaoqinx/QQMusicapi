@@ -10,6 +10,8 @@
 - **业务模块**：`search` / `song` / `user` / `login`
 - **Koa Web 服务**：REST API + 内置 Web UI（首页解析器 + 登录管理页）
 - **APlayer 播放器**：首页集成 [APlayer](https://aplayer.js.org/) 播放器，支持 17 种音质在线试听
+- **首页关键词搜索**：搜索框直接搜歌（分页展示），点击结果即可解析试听
+- **成品下载**：MP3 档下载时自动写入 ID3 标签（歌名/歌手/专辑）并嵌入 500×500 封面与纯文本歌词，文件名为「歌名 - 歌手.mp3」
 - **多平台支持**：Android / Desktop / Web 三种平台版本策略
 
 ## 📦 安装
@@ -85,6 +87,7 @@ PORT=3000 DEVICE_PATH=./device.json npm start
 | --- | --- | --- |
 | `/song/detail?mids=a,b` | GET | 歌曲详情 |
 | `/song/urls?mids=a,b&type=MP3_128` | GET | 播放直链（支持 17 种音质） |
+| `/song/download?mid=...&type=M500` | GET | 成品下载（仅 MP3 档自动写入 ID3 标签：歌名/歌手/专辑/封面/歌词，文件名「歌名 - 歌手.mp3」；其他音质档回源直链） |
 | `/song/lyric?mid=...&decode=1` | GET | 歌词（自动 QRC 解密） |
 | `/song/similar?songid=...` | GET | 相似歌曲 |
 | `/song/relatedSonglist?mid=...` | GET | 相关歌单 |
@@ -144,8 +147,10 @@ PORT=3000 DEVICE_PATH=./device.json npm start
 ### 首页解析器 (`/`)
 
 - 粘贴歌曲链接或 songmid 即可一键解析
+- 关键词搜索歌曲（每页 30 条，支持翻页），点击结果直接解析试听
 - 展示歌曲信息、封面、专辑、歌手
 - 并发获取 17 种音质直链，显示可用 / 不可用状态
+- MP3 档「下载」按钮产出带 ID3 标签（歌名/歌手/专辑/封面/歌词）的成品文件
 - 集成 [APlayer](https://aplayer.js.org/) 播放器，支持歌曲名称、歌手、封面、播放链接展示
 - 歌词多版本切换（原文 / 翻译 / 罗马音）
 - 相似歌曲推荐，点击即可跳转解析

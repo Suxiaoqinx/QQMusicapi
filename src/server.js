@@ -31,6 +31,7 @@ import { SearchType } from "./modules/search.js";
 import { parseSongFileType } from "./modules/song_filetype.js";
 import { QrLoginType } from "./modules/login.js";
 import { qrcDecrypt } from "./algorithms/qrc.js";
+import NodeID3 from "node-id3";
 
 // ==================== 响应辅助 ====================
 
@@ -229,6 +230,24 @@ function searchRouter(client) {
 
 // ==================== 路由: /song ====================
 
+/**
+ * LRC/QRC 歌词文本清洗为 iTunes 可显示的纯文本:
+ * - 丢弃 [ti:/ar:/al:/by:/offset:] 等元数据行
+ * - 去掉行首时间戳标签 ([00:12.34] / [8664,3740] 等)
+ */
+function cleanLrcText(raw) {
+  const lines = String(raw || "").split(/\r?\n/);
+  const out = [];
+  for (const line of lines) {
+    const s = line.trimEnd();
+    if (/^\[(ti|ar|al|by|offset|total|length|re|ve|hash|encoding):/i.test(s)) continue;
+    const text = s.replace(/^(\[[^\]]*\]\s*)+/, "").trimEnd();
+    if (text || (out.length > 0 && out[out.length - 1] !== "")) out.push(text);
+  }
+  while (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return out.join("\n");
+}
+
 function songRouter(client) {
   const router = new Router({ prefix: "/song" });
 
@@ -289,6 +308,87 @@ function songRouter(client) {
     const mid = String(ctx.query.mid ?? "");
     if (!mid) ctx.throw(400, "mid 必填");
     ctx.body = ok(await client.song.getRelatedSonglist(mid));
+  });
+
+  // 下载音频文件, MP3 档自动写入 ID3 标签(歌名/歌手/专辑/封面), 文件名 "歌名 - 歌手.mp3"
+  router.get("/download", async (ctx) => {
+    const mid = String(ctx.query.mid ?? "");
+    if (!mid) ctx.throw(400, "mid 必填");
+    const typeStr = String(ctx.query.type ?? "M500").toUpperCase();
+
+    // 1. 获取直链
+    const urls = await client.song.getPlayUrls([mid], parseSongFileType(typeStr) ?? typeStr);
+    const info = urls?.[mid];
+    if (!info?.url) ctx.throw(502, info?.error || "无可用直链");
+
+    // 2. 并发: 下载音频 + 歌曲详情
+    const [audioResp, detail] = await Promise.all([
+      fetch(info.url),
+      client.song.getDetail([mid]).catch(() => ({ tracks: [] })),
+    ]);
+    if (!audioResp.ok) ctx.throw(502, `音频下载失败: HTTP ${audioResp.status}`);
+    const audioBuf = Buffer.from(await audioResp.arrayBuffer());
+
+    // 3. 组装标签信息
+    const track = detail?.tracks?.[0];
+    const title = String(track?.name || mid);
+    const artist = Array.isArray(track?.singer)
+      ? track.singer.map((s) => s.name).join("/")
+      : String(track?.singer || "");
+    const album = String(track?.album?.name || "");
+    const albumMid = String(track?.album?.mid || "");
+
+    // 4. 文件名: 歌名 - 歌手.mp3 (过滤 Windows 非法字符)
+    const safe = (s) => s.replace(/[\\/:*?"<>|\r\n]/g, "_").trim();
+    const urlExt = info.url.match(/\.(mp3|m4a|ogg|flac|nac)(?:$|\?)/i)?.[1]?.toLowerCase();
+    const ext = urlExt || "mp3";
+    const base = `${safe(title) || mid} - ${safe(artist) || "未知歌手"}`;
+
+    let body = audioBuf;
+    // 5. 仅 MP3 档嵌入 ID3v2 标签 + 封面 + 歌词
+    if (ext === "mp3") {
+      let coverBuf = null;
+      if (albumMid) {
+        try {
+          const cResp = await fetch(
+            `https://y.gtimg.cn/music/photo_new/T002R500x500M000${albumMid}.jpg`,
+          );
+          if (cResp.ok) coverBuf = Buffer.from(await cResp.arrayBuffer());
+        } catch {
+          // 封面失败不阻塞下载
+        }
+      }
+      const frames = { title, artist, album };
+      if (coverBuf && coverBuf.length > 0) {
+        // 注意: node-id3 0.2.9 中 data 别名已失效, 必须用 imageBuffer, 否则封面帧被静默丢弃
+        frames.image = { mime: "image/jpeg", type: 3, description: "Cover", imageBuffer: coverBuf };
+      }
+      // 歌词: 请求 LRC(qrc:false 返回加密数据) -> 解密 -> 去时间戳纯文本 -> USLT 帧 (iTunes 原生读取)
+      // 注: qrc:true 直接返回 QRC XML(逐字时间轴), 不适合嵌入; qrc:false + qrcDecrypt 得到标准行级 LRC
+      try {
+        const lyr = await client.song.getLyrics(mid, { qrc: false, trans: false, roma: false });
+        const rawLrc = lyr?.crypt === 1 && lyr?.lyric ? qrcDecrypt(lyr.lyric) : lyr?.lyric ?? "";
+        const plain = cleanLrcText(rawLrc);
+        if (plain) {
+          frames.unsynchronisedLyrics = { language: "eng", description: "", text: plain };
+        }
+      } catch {
+        // 歌词失败不阻塞下载
+      }
+      try {
+        body = NodeID3.write(frames, audioBuf);
+      } catch {
+        body = audioBuf; // 写标签失败时回退原始文件
+      }
+    }
+
+    ctx.set("Content-Type", "application/octet-stream");
+    ctx.set("Content-Length", String(body.length));
+    ctx.set(
+      "Content-Disposition",
+      `attachment; filename="download.${ext}"; filename*=UTF-8''${encodeURIComponent(`${base}.${ext}`)}`,
+    );
+    ctx.body = body;
   });
 
   return router;

@@ -262,6 +262,32 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .similar-item .s-meta {
+      font-size: 11px;
+      color: #5a6170;
+      margin-top: 3px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .search-pager {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+    .search-pager button {
+      padding: 6px 14px;
+      background: #1a1e26;
+      border: 1px solid #2a313c;
+      border-radius: 5px;
+      color: #c0c5cf;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .search-pager button:hover:not(:disabled) { border-color: #4ea1ff; color: #4ea1ff; }
+    .search-pager button:disabled { opacity: .4; cursor: not-allowed; }
 
     .player-row {
       margin-top: 12px;
@@ -382,6 +408,22 @@
       <input id="urlInput" type="text" placeholder="粘贴歌曲链接 (例如 https://y.qq.com/n/ryqq_v2/songDetail/002kR3lm1nTxkV) 或直接输入 songmid" />
       <button id="parseBtn">解析</button>
       <span class="hint">支持 17 种音质</span>
+    </div>
+
+    <div class="input-row">
+      <input id="searchInput" type="text" placeholder="输入关键词搜索歌曲，例如: 晴天 / 周杰伦" />
+      <button id="searchBtn">搜索</button>
+      <span class="hint">回车搜索 · 点击结果直接试听</span>
+    </div>
+
+    <!-- 搜索结果 -->
+    <div class="section hidden" id="searchSection">
+      <h2>搜索结果 <span id="searchPageInfo" style="font-weight:400;color:#6a7080;font-size:12px;"></span></h2>
+      <div class="similar-list" id="searchList"></div>
+      <div class="search-pager">
+        <button id="prevPage" disabled>上一页</button>
+        <button id="nextPage" disabled>下一页</button>
+      </div>
     </div>
 
     <!-- 歌曲信息 -->
@@ -607,7 +649,13 @@
               item.classList.remove("loading");
               item.classList.add("ok");
               playEl.href = info.url;
-              dlEl.href = info.url;
+              // MP3 档走服务端打标签下载 (文件名 "歌名 - 歌手.mp3", 含封面); 其他档保持直链
+              if (q.code === "M500" || q.code === "M800") {
+                dlEl.href = `/song/download?mid=${encodeURIComponent(mid)}&type=${q.code}`;
+                dlEl.removeAttribute("target");
+              } else {
+                dlEl.href = info.url;
+              }
               playEl.addEventListener("click", (e) => {
                 e.preventDefault();
                 // 使用 APlayer 播放
@@ -704,6 +752,95 @@
     $("urlInput").addEventListener("keydown", (e) => {
       if (e.key === "Enter") parseSong();
     });
+
+    // ===== 关键词搜索 =====
+    const SEARCH_NUM = 30;
+    let searchState = { keyword: "", page: 1 };
+
+    function fmtDur(sec) {
+      const s = Number(sec) || 0;
+      return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    }
+
+    // 用 DOM API 构建条目, 避免歌名/歌手注入 HTML
+    function makeSearchItem(s) {
+      const el = document.createElement("div");
+      el.className = "similar-item";
+      const title = document.createElement("div");
+      title.className = "s-title";
+      title.textContent = s.name || "?";
+      const singer = document.createElement("div");
+      singer.className = "s-singer";
+      singer.textContent = (s.singer || []).map(x => x.name).join(" / ") || "-";
+      const meta = document.createElement("div");
+      meta.className = "s-meta";
+      meta.textContent = [s.album?.name, fmtDur(s.interval)].filter(Boolean).join(" · ");
+      el.append(title, singer, meta);
+      if (s.mid) {
+        el.addEventListener("click", () => {
+          $("urlInput").value = s.mid;
+          parseSong();
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        });
+      }
+      return el;
+    }
+
+    async function doSearch(page) {
+      const keyword = $("searchInput").value.trim();
+      if (!keyword) return;
+      searchState = { keyword, page: page || 1 };
+      const btn = $("searchBtn");
+      btn.disabled = true;
+      btn.textContent = "搜索中…";
+      $("searchSection").classList.remove("hidden");
+      $("searchList").innerHTML = "";
+      $("searchPageInfo").textContent = "";
+      const loading = document.createElement("div");
+      loading.className = "loading";
+      loading.textContent = "搜索中…";
+      $("searchList").appendChild(loading);
+      try {
+        const r = await fetch("/search/byType", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ keyword, type: "song", num: SEARCH_NUM, page: searchState.page })
+        });
+        const j = await r.json();
+        if (j.code !== 0) throw new Error(j.message || `code ${j.code}`);
+        const list = j.data?.body?.item_song || [];
+        $("searchList").innerHTML = "";
+        if (list.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "empty";
+          empty.textContent = "没有找到相关歌曲";
+          $("searchList").appendChild(empty);
+        } else {
+          for (const s of list) $("searchList").appendChild(makeSearchItem(s));
+        }
+        $("searchPageInfo").textContent = `第 ${searchState.page} 页 · ${list.length} 条`;
+        $("prevPage").disabled = searchState.page <= 1 || list.length === 0;
+        $("nextPage").disabled = list.length < SEARCH_NUM;
+      } catch (e) {
+        $("searchList").innerHTML = "";
+        const err = document.createElement("div");
+        err.className = "error-box";
+        err.textContent = `搜索失败: ${e.message || e}`;
+        $("searchList").appendChild(err);
+        $("prevPage").disabled = true;
+        $("nextPage").disabled = true;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "搜索";
+      }
+    }
+
+    $("searchBtn").addEventListener("click", () => doSearch(1));
+    $("searchInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") doSearch(1);
+    });
+    $("prevPage").addEventListener("click", () => doSearch(searchState.page - 1));
+    $("nextPage").addEventListener("click", () => doSearch(searchState.page + 1));
 
     checkStatus();
   </script>
